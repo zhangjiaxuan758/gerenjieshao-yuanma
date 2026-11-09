@@ -543,7 +543,7 @@
                             <div class="text-xs sm:text-sm text-gray-600 dark:text-gray-400">总 Stars</div>
                         </div>
                     </div>
-                    <p class="mt-2 text-center text-[11px] text-gray-400 dark:text-gray-500">
+                    <p id="sync-hint" class="mt-2 text-center text-[11px] text-gray-400 dark:text-gray-500">
                         <i class="fa-solid fa-rotate mr-1"></i>数据每 60 秒自动同步，无需刷新页面
                     </p>
                     <!-- 技术标签 -->
@@ -595,7 +595,7 @@
                         <a href="https://music.jrr.lol" target="_blank" rel="noopener noreferrer"
                            class="group flex flex-col items-center justify-center gap-2 px-2 py-4 sm:px-4 sm:py-5 rounded-xl border border-gray-200/70 dark:border-gray-600/60 bg-white/60 dark:bg-gray-700/60 hover:-translate-y-0.5 hover:shadow-lg transition-all duration-300">
                             <i class="fa-solid fa-music text-xl sm:text-2xl text-primary dark:text-primary-dark"></i>
-                            <span class="text-xs sm:text-sm font-semibold text-gray-700 dark:text-gray-200 group-hover:text-primary dark:group-hover:text-primary-dark transition-colors whitespace-nowrap">轩的音乐</span>
+                            <span class="text-xs sm:text-sm font-semibold text-gray-700 dark:text-gray-200 group-hover:text-primary dark:group-hover:text-primary-dark transition-colors whitespace-nowrap">小轩音乐</span>
                             <span class="hidden sm:inline text-[11px] text-gray-400 dark:text-gray-500">music.jrr.lol</span>
                         </a>
                     </div>
@@ -865,6 +865,12 @@
                 }
             ];
 
+            // 把构建时的图表基线暴露给实时同步脚本（活动概览 / Star 增长也实时更新）
+            window.__GH_CHARTS = {};
+            for (const _spec of chartSpecs) {
+                window.__GH_CHARTS[_spec.canvasId] = { labels: _spec.labels, data: _spec.data };
+            }
+
             const buildChartConfig = (spec) => {
                 const theme = readChartTheme();
                 const isBar = spec.seriesKey === 'bar';
@@ -985,7 +991,7 @@
     <!-- GitHub 仓库数 / Star / 最近项目实时同步：页面无需刷新 -->
     <script>
     (function () {
-        var API = 'https://api.github.com/users/YOUR_GITHUB_USERNAME/repos?per_page=100&sort=pushed';
+        var API = 'https://api.github.com/users/zhangjiaxuan758/repos?per_page=100&sort=pushed';
         var NORMAL_MS = 60000;   // 正常每 60 秒同步
         var SLOW_MS = 300000;    // 触发 GitHub 限流时降频到 5 分钟
         var timer = null;
@@ -1023,6 +1029,91 @@
             timer = setInterval(refresh, ms);
         }
 
+        /* ---------- 图表实时更新 ---------- */
+
+        // 与服务端同口径的 X 轴标签：最近 12 个自然月，最旧月 → 最新月
+        function monthLabels() {
+            var n = new Date(), out = [];
+            for (var i = 11; i >= 0; i--) {
+                var t = n.getFullYear() * 12 + n.getMonth() - i;
+                out.push((t % 12 + 1) + '月');
+            }
+            return out;
+        }
+
+        function monthIndexOf(dateStr, now) {
+            var d = new Date(dateStr || '');
+            if (isNaN(d.getTime())) return -1;
+            var m = (now.getFullYear() - d.getFullYear()) * 12 + (now.getMonth() - d.getMonth());
+            return m;
+        }
+
+        // Star 增长：累计 star 按仓库创建月摊开（与服务端 get_github_star_history 同算法）
+        function starSeries(repos) {
+            var now = new Date(), totals = [0,0,0,0,0,0,0,0,0,0,0,0], sum = 0;
+            repos.forEach(function (r) {
+                var st = (r && r.stargazers_count) || 0;
+                if (st <= 0) return;
+                var mi = monthIndexOf(r.created_at, now);
+                if (mi < 0) return;
+                var last = Math.min(mi, 11);
+                for (var i = 0; i <= last; i++) totals[i] += st;
+            });
+            for (var i = 0; i < 12; i++) sum += totals[i];
+            if (sum === 0) return null;          // 没有 star 数据时保留构建时基线
+            return totals.reverse();
+        }
+
+        // 活动概览：Events API 按月统计推送次数，与构建时基线取最大值（只增不减）
+        function activitySeries(build, onDone) {
+            var pages = 3, got = 0, events = [];
+            for (var p = 1; p <= pages; p++) {
+                (function (pg) {
+                    fetch('https://api.github.com/users/zhangjiaxuan758/events?page=' + pg + '&per_page=100',
+                          { headers: { 'Accept': 'application/vnd.github+json' }, cache: 'no-store' })
+                        .then(function (r) { return r.ok ? r.json() : []; })
+                        .then(function (arr) { if (Array.isArray(arr)) events = events.concat(arr); })
+                        .catch(function () {})
+                        .then(function () { if (++got === pages) finish(); });
+                })(p);
+            }
+            function finish() {
+                if (!events.length) return onDone(null);
+                var now = new Date(), counts = [0,0,0,0,0,0,0,0,0,0,0,0], seen = {}, maxMd = -1;
+                events.forEach(function (e) {
+                    if (!e || e.type !== 'PushEvent') return;
+                    var key = ((e.repo && e.repo.name) || '') + ' ' + (e.created_at || '');
+                    if (seen[key]) return;
+                    seen[key] = 1;
+                    var md = monthIndexOf(e.created_at, now);
+                    if (md < 0) return;
+                    if (md <= 11) { counts[md] += 1; if (md > maxMd) maxMd = md; }
+                });
+                var out = build.slice();
+                // Events 只覆盖最近一段时间：覆盖到的月份用「max(基线, 实时)」，更早的月份保留基线
+                for (var i = 0; i < 12; i++) {
+                    if (i <= maxMd && counts[i] > out[i]) out[i] = counts[i];
+                }
+                onDone(out);
+            }
+        }
+
+        function updateChart(id, labels, data) {
+            var c = (window.Chart && window.Chart.getChart) ? window.Chart.getChart(id) : null;
+            if (!c || !data) return;
+            c.data.labels = labels;
+            c.data.datasets[0].data = data;
+            c.update();
+        }
+
+        function markSynced() {
+            var el = document.getElementById('sync-hint');
+            if (!el) return;
+            var t = new Date();
+            var hh = ('0' + t.getHours()).slice(-2), mm = ('0' + t.getMinutes()).slice(-2), ss = ('0' + t.getSeconds()).slice(-2);
+            el.innerHTML = '<i class="fa-solid fa-rotate mr-1"></i>数据每 60 秒自动同步，无需刷新页面 · 上次同步 ' + hh + ':' + mm + ':' + ss;
+        }
+
         function refresh() {
             fetch(API, { headers: { 'Accept': 'application/vnd.github+json' }, cache: 'no-store' })
                 .then(function (res) {
@@ -1037,6 +1128,17 @@
                     if (elR) elR.textContent = repos.length;
                     if (elS) elS.textContent = repos.reduce(function (s, r) { return s + (r.stargazers_count || 0); }, 0);
                     renderRepos(repos);
+                    // 图表实时更新（不需要刷新页面）
+                    var labels = monthLabels();
+                    var star = starSeries(repos);
+                    if (star && window.__GH_CHARTS && window.__GH_CHARTS.starChart) {
+                        updateChart('starChart', labels, star);
+                    }
+                    var base = (window.__GH_CHARTS && window.__GH_CHARTS.activityChart) ? window.__GH_CHARTS.activityChart.data : null;
+                    if (base) {
+                        activitySeries(base, function (act) { if (act) updateChart('activityChart', labels, act); });
+                    }
+                    markSynced();
                 })
                 .catch(function () { /* 网络不可用时保留页面上的静态快照 */ });
         }
